@@ -95,15 +95,19 @@ public:
     }
 
     void View() {
-        gfxHeader(applet_name());
         DrawInterface();
     }
 
     void OnButtonPress() {
-        if (++cursor > 4) cursor = 0;
+        CursorAction(cursor, 4);
     }
 
     void OnEncoderMove(int direction) {
+        if (!EditMode()) {
+            MoveCursor(cursor, direction, 4);
+            return;
+        }
+
         if (cursor == 4) { // Blend
             blend = constrain(blend + direction, 0, BNC_MAX_PARAM);
         } else {
@@ -121,11 +125,10 @@ public:
                 SetEGFreq(ch);
             }
         }
-        ResetCursor();
     }
         
-    uint32_t OnDataRequest() {
-        uint32_t data = 0;
+    uint64_t OnDataRequest() {
+        uint64_t data = 0;
         Pack(data, PackLocation {0,6}, tone[0]);
         Pack(data, PackLocation {6,6}, decay[0]);
         Pack(data, PackLocation {12,6}, tone[1]);
@@ -134,7 +137,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint32_t data) {
+    void OnDataReceive(uint64_t data) {
         tone[0] = Unpack(data, PackLocation {0,6});
         decay[0] = Unpack(data, PackLocation {6,6});
         tone[1] = Unpack(data, PackLocation {12,6});
@@ -191,6 +194,7 @@ private:
         byte p = is_cursor ? 1 : 3;
         gfxDottedLine(x, y + 4, 62, y + 4, p);
         gfxRect(x + w, y, 2, 7);
+        if (EditMode() && is_cursor) gfxInvert(x, y, 18, 7);
     }
 
     void SetBDFreq() {
@@ -219,5 +223,5 @@ void BootsNCat_View(bool hemisphere) {BootsNCat_instance[hemisphere].BaseView();
 void BootsNCat_OnButtonPress(bool hemisphere) {BootsNCat_instance[hemisphere].OnButtonPress();}
 void BootsNCat_OnEncoderMove(bool hemisphere, int direction) {BootsNCat_instance[hemisphere].OnEncoderMove(direction);}
 void BootsNCat_ToggleHelpScreen(bool hemisphere) {BootsNCat_instance[hemisphere].HelpScreen();}
-uint32_t BootsNCat_OnDataRequest(bool hemisphere) {return BootsNCat_instance[hemisphere].OnDataRequest();}
-void BootsNCat_OnDataReceive(bool hemisphere, uint32_t data) {BootsNCat_instance[hemisphere].OnDataReceive(data);}
+uint64_t BootsNCat_OnDataRequest(bool hemisphere) {return BootsNCat_instance[hemisphere].OnDataRequest();}
+void BootsNCat_OnDataReceive(bool hemisphere, uint64_t data) {BootsNCat_instance[hemisphere].OnDataReceive(data);}

@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#define HEM_CLOCKDIV_MAX 8
+#define HEM_CLOCKDIV_MAX 24
 
 class ClockDivider : public HemisphereApplet {
 public:
@@ -27,16 +27,7 @@ public:
         return "Clock Div";
     }
 
-    void Start() {
-        ForEachChannel(ch)
-        {
-            div[ch] = ch + 1;
-            count[ch] = 0;
-            next_clock[ch] = 0;
-        }
-        cycle_time = 0;
-        cursor = 0;
-    }
+    void Start() { }
 
     void Controller() {
         int this_tick = OC::CORE::ticks;
@@ -44,9 +35,9 @@ public:
         // Set division via CV
         ForEachChannel(ch)
         {
-            int input = DetentedIn(ch) - HEMISPHERE_CENTER_CV;
+            int input = DetentedIn(ch);
             if (input) {
-                div[ch] = Proportion(input, HEMISPHERE_MAX_CV / 2, HEM_CLOCKDIV_MAX);
+                div[ch] = Proportion(input, HEMISPHERE_MAX_INPUT_CV / 2, HEM_CLOCKDIV_MAX);
                 div[ch] = constrain(div[ch], -HEM_CLOCKDIV_MAX, HEM_CLOCKDIV_MAX);
                 if (div[ch] == 0 || div[ch] == -1) div[ch] = 1;
             }
@@ -64,10 +55,8 @@ public:
             {
                 count[ch]++;
                 if (div[ch] > 0) { // Positive value indicates clock division
-                    if (count[ch] >= div[ch]) {
-                        count[ch] = 0; // Reset
-                        ClockOut(ch);
-                    }
+                    if (count[ch] == 1) ClockOut(ch); // fire on first step
+                    if (count[ch] >= div[ch]) count[ch] = 0; // Reset on last step
                 } else {
                     // Calculate next clock for multiplication on each clock
                     int clock_every = (cycle_time / -div[ch]);
@@ -91,16 +80,19 @@ public:
     }
 
     void View() {
-        gfxHeader(applet_name());
         DrawSelector();
     }
 
     void OnButtonPress() {
-        cursor = 1 - cursor;
-        ResetCursor();
+        CursorAction(cursor, 1);
     }
 
     void OnEncoderMove(int direction) {
+        if (!EditMode()) {
+            MoveCursor(cursor, direction, 1);
+            return;
+        }
+
         div[cursor] += direction;
         if (div[cursor] > HEM_CLOCKDIV_MAX) div[cursor] = HEM_CLOCKDIV_MAX;
         if (div[cursor] < -HEM_CLOCKDIV_MAX) div[cursor] = -HEM_CLOCKDIV_MAX;
@@ -130,17 +122,16 @@ protected:
     }
 
 private:
-    int div[2]; // Division data for outputs. Positive numbers are divisions, negative numbers are multipliers
-    int count[2]; // Number of clocks since last output (for clock divide)
-    int next_clock[2]; // Tick number for the next output (for clock multiply)
-    int cursor; // Which output is currently being edited
-    int cycle_time; // Cycle time between the last two clock inputs
+    int div[2] = {1, 2}; // Division data for outputs. Positive numbers are divisions, negative numbers are multipliers
+    int count[2] = {0,0}; // Number of clocks since last output (for clock divide)
+    int next_clock[2] = {0,0}; // Tick number for the next output (for clock multiply)
+    int cursor = 0; // Which output is currently being edited
+    int cycle_time = 0; // Cycle time between the last two clock inputs
 
     void DrawSelector() {
         ForEachChannel(ch)
         {
             int y = 15 + (ch * 25);
-            if (ch == cursor) gfxCursor(0, y + 8, 63);
 
             if (div[ch] > 0) {
                 gfxPrint(1, y, "/");
@@ -153,6 +144,7 @@ private:
                 gfxPrint(" Mult");
             }
         }
+        gfxCursor(0, 23 + (cursor * 25), 63);
     }
 };
 

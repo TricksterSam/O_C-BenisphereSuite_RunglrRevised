@@ -27,14 +27,29 @@
 #include "SH1106_128x64_driver.h"
 #include "../../OC_gpio.h"
 #include "../../OC_options.h"
+#include "../../util/util_debugpins.h"
+#if defined(__IMXRT1062__)
+#include <SPI.h>
+#endif
 
+// NOTE: Don't disable DMA unless you absolutely know what you're doing. It will hurt you.
+#if defined(__MK20DX256__)
 #define DMA_PAGE_TRANSFER
 #ifdef DMA_PAGE_TRANSFER
 #include <DMAChannel.h>
 static DMAChannel page_dma;
+static bool page_dma_active = false;
 #endif
 #ifndef SPI_SR_RXCTR
 #define SPI_SR_RXCTR 0XF0
+#endif
+
+// Teensy 4.1 has large SPI FIFO, so FIFO and interrupt is used rather than DMA
+#elif defined(__IMXRT1062__)
+static void spi_sendpage_isr();
+static int sendpage_state;
+static int sendpage_count;
+static const uint32_t *sendpage_src;
 #endif
 
 static uint8_t SH1106_data_start_seq[] = {
@@ -84,9 +99,9 @@ static uint8_t SH1106_display_on_seq[] = {
 
 /*static*/
 void SH1106_128x64_Driver::Init() {
-  pinMode(OLED_CS, OUTPUT);
-  pinMode(OLED_RST, OUTPUT);
-  pinMode(OLED_DC, OUTPUT);
+  OC::pinMode(OLED_CS, OUTPUT);
+  OC::pinMode(OLED_RST, OUTPUT);
+  OC::pinMode(OLED_DC, OUTPUT);
   //SPI_init(); 
 
   // u8g_teensy::U8G_COM_MSG_INIT
@@ -107,10 +122,13 @@ void SH1106_128x64_Driver::Init() {
 
   digitalWriteFast(OLED_CS, OLED_CS_ACTIVE); // U8G_ESC_CS(1),             /* enable chip */
 
+  // assumes OC::DAC:Init already initialized SPI
   SPI_send(SH1106_init_seq, sizeof(SH1106_init_seq));
 
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0),             /* disable chip */
+  delayMicroseconds(1);
 
+#if defined(__MK20DX256__)
 #ifdef DMA_PAGE_TRANSFER
   page_dma.destination((volatile uint8_t&)SPI0_PUSHR);
   page_dma.transferSize(1);
@@ -118,7 +136,17 @@ void SH1106_128x64_Driver::Init() {
   page_dma.disableOnCompletion();
   page_dma.triggerAtHardwareEvent(DMAMUX_SOURCE_SPI0_TX);
   page_dma.disable();
-#endif
+#endif // DMA_PAGE_TRANSFER
+
+#elif defined(__IMXRT1062__)
+  LPSPI4_IER = 0;
+  LPSPI4_SR = 0x3F00; // clear any prior pending interrupt flags
+  LPSPI4_FCR = LPSPI_FCR_RXWATER(0) | LPSPI_FCR_TXWATER(3);
+  attachInterruptVector(IRQ_LPSPI4, spi_sendpage_isr);
+  NVIC_CLEAR_PENDING(IRQ_LPSPI4);
+  NVIC_SET_PRIORITY(IRQ_LPSPI4, 48);
+  NVIC_ENABLE_IRQ(IRQ_LPSPI4);
+#endif // __IMXRT1062__
 
   Clear();
 }
@@ -126,14 +154,32 @@ void SH1106_128x64_Driver::Init() {
 /*static*/
 void SH1106_128x64_Driver::Flush() {
 #ifdef DMA_PAGE_TRANSFER
-  // Assume DMA transfer has completed, else we're doomed
-  digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0)
-  page_dma.clearComplete();
-  page_dma.disable();
-  // DmaSpi.h::post_finishCurrentTransfer_impl
-  SPI0_RSER = 0;
-  SPI0_SR = 0xFF0F0000;
-#endif
+  // Famous last words: "Assume DMA transfer has completed, else we're doomed"
+  // Because it turns out there are conditions(*) where the timing is shifted
+  // such that it hasn't completed here, which causes weird display glitches
+  // from which there's no recovery.
+  //
+  // (*) If app processing in frame N takes too long, the next frame starts
+  // late; this leaves less time for frame N+1, and in N+2 the display CS line
+  // would be pulled high too soon. Why this effect is more pronounced with
+  // gcc >= 5.4.1 is a different mystery.
+
+#if defined(__MK20DX256__)
+  if (page_dma_active) {
+    while (!page_dma.complete()) { }
+    while (0 != (SPI0_SR & 0x0000f000)); // SPIx_SR TXCTR
+    while (!(SPI0_SR & SPI_SR_TCF));
+    page_dma_active = false;
+
+    digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0)
+    page_dma.clearComplete();
+    page_dma.disable();
+    // DmaSpi.h::post_finishCurrentTransfer_impl
+    SPI0_RSER = 0;
+    SPI0_SR = 0xFF0F0000;
+  }
+#endif // __MK20DX256__
+#endif // DMA_PAGE_TRANSFER
 }
 
 static uint8_t empty_page[SH1106_128x64_Driver::kPageSize];
@@ -150,13 +196,16 @@ void SH1106_128x64_Driver::Clear() {
   for (size_t p = 0; p < kNumPages; ++p)
     SPI_send(empty_page, kPageSize);
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0)
+  delayMicroseconds(1);
 
   digitalWriteFast(OLED_DC, LOW);
   digitalWriteFast(OLED_CS, OLED_CS_ACTIVE);
   SPI_send(SH1106_display_on_seq, sizeof(SH1106_display_on_seq));
   digitalWriteFast(OLED_DC, HIGH);
+  digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
 }
 
+#if defined(__MK20DX256__)
 /*static*/
 void SH1106_128x64_Driver::SendPage(uint_fast8_t index, const uint8_t *data) {
   SH1106_data_start_seq[2] = 0xb0 | index;
@@ -173,12 +222,82 @@ void SH1106_128x64_Driver::SendPage(uint_fast8_t index, const uint8_t *data) {
 
   page_dma.sourceBuffer(data, kPageSize);
   page_dma.enable(); // go
-#else
+  page_dma_active = true;
+#else // not DMA_PAGE_TRANSFER
   SPI_send(data, kPageSize);
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0)
 #endif
 }
 
+#elif defined(__IMXRT1062__)
+/*static*/
+void SH1106_128x64_Driver::SendPage(uint_fast8_t index, const uint8_t *data) {
+  SH1106_data_start_seq[2] = 0xb0 | index;
+  sendpage_state = 0;
+  sendpage_src = (const uint32_t *)data; // frame buffer is 32 bit aligned
+  sendpage_count = kPageSize >> 2; // number of 32 bit words to write into FIFO
+  // don't clear SPI status flags, already cleared before DAC data was loaded into FIFO
+  LPSPI4_IER = LPSPI_IER_TCIE; // run spi_sendpage_isr() when DAC data complete
+}
+
+static void spi_sendpage_isr() {
+  DEBUG_PIN_SCOPE(OC_GPIO_DEBUG_PIN2);
+  uint32_t status = LPSPI4_SR;
+  LPSPI4_SR = status; // clear interrupt status flags
+  if (sendpage_state == 0) {
+    // begin command phase
+    digitalWriteFast(OLED_DC, LOW);
+    digitalWriteFast(OLED_CS, OLED_CS_ACTIVE);
+    LPSPI4_TCR = (LPSPI4_TCR & 0xF8000000) | LPSPI_TCR_FRAMESZ(23)
+      | LPSPI_TCR_PCS(3) | LPSPI_TCR_RXMSK;
+    LPSPI4_TDR = (SH1106_data_start_seq[0] << 16) | (SH1106_data_start_seq[1] << 8)
+      | SH1106_data_start_seq[2];
+    sendpage_state = 1;
+    LPSPI4_IER = LPSPI_IER_TCIE; // run spi_sendpage_isr() when command complete
+    return; // FIFO loaded with 3 byte command
+  }
+  if (sendpage_state == 1) {
+    // begin data phase
+    digitalWriteFast(OLED_DC, HIGH);
+    LPSPI4_CR |= LPSPI_CR_RRF | LPSPI_CR_RTF; // clear FIFO
+    LPSPI4_IER = LPSPI_IER_TDIE; // run spi_sendpage_isr() when FIFO wants data
+    const size_t nbits = SH1106_128x64_Driver::kPageSize * 8;
+    LPSPI4_TCR = (LPSPI4_TCR & 0xF8000000) | LPSPI_TCR_FRAMESZ(nbits-1)
+      | LPSPI_TCR_PCS(3) | LPSPI_TCR_RXMSK | LPSPI_TCR_BYSW;
+    sendpage_state = 2;
+  }
+  if (sendpage_state == 2) {
+    // feed display data into the FIFO
+    if (!(status & LPSPI_SR_TDF)) return;
+    const int fifo_space = 16 - (LPSPI4_FSR & 0x1F);
+    if (fifo_space < sendpage_count) {
+      // we have more data than the FIFO can hold
+      LPSPI4_IER = LPSPI_IER_TDIE; // run spi_sendpage_isr() when FIFO wants more data
+      for (int i=0; i < fifo_space; i++) {
+        LPSPI4_TDR = *sendpage_src++;
+        asm volatile ("dsb":::"memory");
+      }
+      sendpage_count -= fifo_space;
+    } else {
+      // remaining data fits in FIFO
+      LPSPI4_IER = LPSPI_IER_TCIE; // run spi_sendpage_isr() when all display data finished
+      for (int i=0; i < sendpage_count; i++) {
+        LPSPI4_TDR = *sendpage_src++;
+        asm volatile ("dsb":::"memory");
+      }
+      sendpage_count = 0;
+      sendpage_state = 3;
+    }
+    return;
+  } else {
+    // finished
+    digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
+    LPSPI4_IER = 0;
+  }
+}
+#endif // __IMXRT1062__
+
+#if defined(__MK20DX256__)
 void SH1106_128x64_Driver::SPI_send(void *bufr, size_t n) {
 
   // adapted from https://github.com/xxxajk/spi4teensy3
@@ -221,6 +340,15 @@ void SH1106_128x64_Driver::SPI_send(void *bufr, size_t n) {
           nf--;
   }
 }
+
+#elif defined(__IMXRT1062__)
+void SH1106_128x64_Driver::SPI_send(void *bufr, size_t n) {
+  SPI.beginTransaction(SPISettings(24000000, MSBFIRST, SPI_MODE0));
+  LPSPI4_TCR |= LPSPI_TCR_PCS(3); // do not interfere with DAC's CS pin
+  SPI.transfer(bufr, NULL, n);
+  SPI.endTransaction();
+}
+#endif // __IMXRT1062__
 
 /*static*/
 void SH1106_128x64_Driver::AdjustOffset(uint8_t offset) {

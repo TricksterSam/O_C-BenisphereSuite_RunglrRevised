@@ -26,6 +26,12 @@
 class ProbabilityDivider : public HemisphereApplet {
 public:
 
+    enum ProbDivCursor {
+        WEIGHT1, WEIGHT2, WEIGHT4, WEIGHT8,
+        LOOP_LENGTH,
+        LAST_SETTING = LOOP_LENGTH
+    };
+
     const char* applet_name() {
         return "ProbDiv";
     }
@@ -48,13 +54,13 @@ public:
         loop_linker->RegisterDiv(hemisphere);
 
         // CV 1 control over loop length
-        int lengthCv = DetentedIn(0);
-        if (lengthCv < 0) loop_length = 0;        
-        if (lengthCv > 0) {
-            loop_length = constrain(ProportionCV(lengthCv, HEM_PROB_DIV_MAX_LOOP_LENGTH + 1), 0, HEM_PROB_DIV_MAX_LOOP_LENGTH);
+        loop_length_mod = loop_length;
+        if (DetentedIn(0)) {
+            Modulate(loop_length_mod, 0, 0, HEM_PROB_DIV_MAX_LOOP_LENGTH);
+            // TODO: regenerate if changing from 0?
         }
 
-        loop_linker->SetLooping(loop_length > 0);
+        loop_linker->SetLooping(loop_length_mod > 0);
 
         // reset
         if (Clock(1)) {
@@ -79,7 +85,7 @@ public:
             }
 
             // reset loop
-            if (loop_length > 0 && loop_step >= loop_length) {
+            if (loop_length_mod > 0 && loop_step >= loop_length_mod) {
                 loop_step = 0;
                 loop_index = 0;
                 skip_steps = 0;
@@ -90,15 +96,16 @@ public:
 
             // continue with active division
             if (--skip_steps > 0) {
-                if (loop_length > 0) {
+                if (loop_length_mod > 0) {
                     loop_step++;
                 }
                 ClockOut(1);
+                loop_linker->Trigger(1);
                 return;
             }
 
             // get next weighted div or next div from loop
-            if (loop_length > 0) {
+            if (loop_length_mod > 0) {
                 skip_steps = GetNextLoopDiv();
             } else {
                 skip_steps = GetNextWeightedDiv();
@@ -110,7 +117,7 @@ public:
             }
 
             ClockOut(0);
-            loop_linker->Trigger();
+            loop_linker->Trigger(0);
             pulse_animation = HEMISPHERE_PULSE_ANIMATION_TIME;
         }
 
@@ -126,28 +133,37 @@ public:
     }
 
     void View() {
-        gfxHeader(applet_name());
         DrawInterface();
     }
 
     void OnButtonPress() {
-        if (++cursor > 4) cursor = 0;
+        CursorAction(cursor, LAST_SETTING);
     }
 
     void OnEncoderMove(int direction) {
-        if (cursor == 0) weight_1 = constrain(weight_1 += direction, 0, HEM_PROB_DIV_MAX_WEIGHT);
-        if (cursor == 1) weight_2 = constrain(weight_2 += direction, 0, HEM_PROB_DIV_MAX_WEIGHT);
-        if (cursor == 2) weight_4 = constrain(weight_4 += direction, 0, HEM_PROB_DIV_MAX_WEIGHT);
-        if (cursor == 3) weight_8 = constrain(weight_8 += direction, 0, HEM_PROB_DIV_MAX_WEIGHT);
-        if (cursor == 4) {
+        if (!EditMode()) {
+            MoveCursor(cursor, direction, LAST_SETTING);
+            return;
+        }
+
+        switch ((ProbDivCursor)cursor) {
+        case WEIGHT1: weight_1 = constrain(weight_1 + direction, 0, HEM_PROB_DIV_MAX_WEIGHT); break;
+        case WEIGHT2: weight_2 = constrain(weight_2 + direction, 0, HEM_PROB_DIV_MAX_WEIGHT); break;
+        case WEIGHT4: weight_4 = constrain(weight_4 + direction, 0, HEM_PROB_DIV_MAX_WEIGHT); break;
+        case WEIGHT8: weight_8 = constrain(weight_8 + direction, 0, HEM_PROB_DIV_MAX_WEIGHT); break;
+        case LOOP_LENGTH: {
             int old = loop_length;
-            loop_length = constrain(loop_length += direction, 0, HEM_PROB_DIV_MAX_LOOP_LENGTH);
+            loop_length = constrain(loop_length + direction, 0, HEM_PROB_DIV_MAX_LOOP_LENGTH);
             if (old == 0 && loop_length > 0) {
                 // seed loop
                 GenerateLoop(true);
             }
+            break;
         }
-        if (cursor < 4 && loop_length > 0) {
+        default: break;
+        }
+
+        if (cursor < LOOP_LENGTH && loop_length > 0) {
           GenerateLoop(false);
         }
     }
@@ -187,12 +203,12 @@ protected:
     }
     
 private:
-    int cursor;
+    int cursor; // ProbDivCursor 
     int weight_1;
     int weight_2;
     int weight_4;
     int weight_8;
-    int loop_length;
+    int loop_length, loop_length_mod;
     int loop[HEM_PROB_DIV_MAX_LOOP_LENGTH];
     int loop_index;
     int loop_step;
@@ -229,12 +245,12 @@ private:
         if (reseed_animation > 0) {
             gfxInvert(4, 55, 12, 8);
         }
-        if (loop_length == 0) {
+        if (loop_length_mod == 0) {
             gfxPrint(19, 55, "off");
         } else {
-            gfxPrint(19, 55, loop_length);
+            gfxPrint(19, 55, loop_length_mod);
         }
-        if (cursor == 4) gfxCursor(19, 63, 18);
+        if (cursor == LOOP_LENGTH) gfxCursor(19, 63, 18);
 
         if (reset_animation > 0) {
             gfxPrint(52, 55, "R");
@@ -243,9 +259,10 @@ private:
 
     void DrawKnobAt(byte x, byte y, byte len, byte value, bool is_cursor) {
         byte p = is_cursor ? 1 : 3;
-        byte w = Proportion(value, HEM_PROB_DIV_MAX_WEIGHT, len);
-        gfxDottedLine(x, y + 4, x + len, y + 4, p);
+        byte w = Proportion(value, HEM_PROB_DIV_MAX_WEIGHT, len-1);
+        gfxDottedLine(x, y + 3, x + len, y + 3, p);
         gfxRect(x + w, y, 2, 7);
+        if (EditMode() && is_cursor) gfxInvert(x-1, y, len+3, 7);
     }
 
     int GetNextWeightedDiv() {

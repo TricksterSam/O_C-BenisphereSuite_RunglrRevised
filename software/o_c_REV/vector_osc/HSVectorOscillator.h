@@ -111,8 +111,10 @@ public:
 
     /* frequency is centihertz (e.g., 440 Hz is 44000) */
     void SetFrequency(uint32_t frequency_) {
-        frequency = frequency_;
-        rise = calculate_rise(segment_index);
+        if (frequency_ != frequency) {
+            frequency = frequency_;
+            rise = calculate_rise(segment_index);
+        }
     }
 
     bool GetEOC() {return eoc;}
@@ -134,6 +136,14 @@ public:
         eoc = !cycle;
     }
 
+    void SetPhase(uint8_t index) {
+        segment_index = index;
+        signal = scale_level(segments[segment_count - 1].level);
+        rise = calculate_rise(segment_index);
+        sustained = 0;
+        eoc = !cycle;
+    }
+
     int32_t Next() {
     		// For non-cycling waveforms, send the level of the last step if eoc
     		if (eoc && cycle == 0) {
@@ -145,8 +155,8 @@ public:
 			if (validate()) {
 				if (rise) {
 					signal += rise;
-					if (rise >= 0 && signal >= target) advance_segment();
-					if (rise < 0 && signal <= target) advance_segment();
+                    if (rise > 0 && signal >= target) advance_segment();
+                    else if (rise < 0 && signal <= target) advance_segment();
 				} else {
 					if (countdown) {
 						--countdown;

@@ -24,6 +24,7 @@
 #define OC_APP_H_
 
 #include "UI/ui_events.h"
+#include "util/util_turing.h"
 #include "util/util_misc.h"
 
 namespace OC {
@@ -82,6 +83,9 @@ namespace apps {
   int index_of(uint16_t id);
 
 }; // namespace apps
+
+void draw_save_message(uint8_t c);
+void save_app_data();
 
 }; // namespace OC
 
